@@ -1,22 +1,67 @@
-from transformers import pipeline
-import torch
 import gc
-from tqdm import tqdm
-from typing import List, Dict, Any, Optional
-import whisperx
 import os
-import numpy as np
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
 import noisereduce as nr
+import numpy as np
+import torch
+import whisperx
 from pydub import AudioSegment
 from pydub.effects import normalize
+from tqdm import tqdm
+
+
+@dataclass(frozen=True)
+class DeviceConfig:
+    device: str
+    compute_type: str
+    backend: str
+
+
+class HardwareSelector:
+    """Selects execution backend, preferring AMD ROCm for RX5700 when available."""
+
+    def __init__(self, preferred_gpu_name: str = "RX5700"):
+        self.preferred_gpu_name = preferred_gpu_name.lower()
+
+    def select(self) -> DeviceConfig:
+        if not torch.cuda.is_available():
+            return DeviceConfig(device="cpu", compute_type="int8", backend="cpu")
+
+        device_name = torch.cuda.get_device_name(0).lower()
+        is_rocm = bool(getattr(torch.version, "hip", None))
+
+        if is_rocm:
+            compute_type = "float16"
+            backend = "rocm"
+        else:
+            compute_type = "float16"
+            backend = "cuda"
+
+        if self.preferred_gpu_name not in device_name:
+            print(
+                f"Warning: preferred GPU '{self.preferred_gpu_name}' not detected. "
+                f"Using '{device_name}' via {backend}."
+            )
+        else:
+            print(f"Using AMD GPU '{device_name}' via {backend}.")
+
+        # whisperx expects device='cuda' for both CUDA and ROCm torch backends.
+        return DeviceConfig(device="cuda", compute_type=compute_type, backend=backend)
+
 
 class AudioProcessor:
     def __init__(self, target_sample_rate: int = 16000, noise_reduction_amount: float = 0.75):
         self.target_sr = target_sample_rate
         self.nr_amount = noise_reduction_amount
 
-    def process_file(self, input_path: str, output_path: Optional[str] = None,
-                     test_duration_sec: Optional[int] = None) -> str:
+    def process_file(
+        self,
+        input_path: str,
+        output_path: Optional[str] = None,
+        test_duration_sec: Optional[int] = None,
+    ) -> str:
         if not os.path.exists(input_path):
             raise FileNotFoundError(f"Could not find the file: {input_path}")
 
@@ -24,118 +69,128 @@ class AudioProcessor:
             base_name, _ = os.path.splitext(input_path)
             output_path = f"{base_name}_cleaned.wav"
 
-        print(f"Loading and formatting {input_path}...")
-        audio: AudioSegment = AudioSegment.from_file(input_path)
-
+        audio = AudioSegment.from_file(input_path)
 
         if test_duration_sec is not None:
-            print(f"Slicing audio to the first {test_duration_sec} seconds for rapid testing...")
-            # pydub works in milliseconds, so multiply by 1000
-            audio = audio[:test_duration_sec * 1000]
+            audio = audio[: test_duration_sec * 1000]
 
-        audio = audio.set_channels(1)
-        audio = audio.set_frame_rate(self.target_sr)
+        audio = audio.set_channels(1).set_frame_rate(self.target_sr)
+        samples = np.array(audio.get_array_of_samples())
+        samples_float = samples.astype(np.float32) / 32768.0
 
-        print("Applying spectral noise reduction...")
-        samples: np.ndarray = np.array(audio.get_array_of_samples())
-        samples_float: np.ndarray = samples.astype(np.float32) / 32768.0
-
-        cleaned_float: np.ndarray = nr.reduce_noise(
+        cleaned_float = nr.reduce_noise(
             y=samples_float,
             sr=self.target_sr,
-            prop_decrease=self.nr_amount
+            prop_decrease=self.nr_amount,
         )
 
-        cleaned_int16: np.ndarray = (cleaned_float * 32768.0).astype(np.int16)
-        audio = audio._spawn(cleaned_int16.tobytes())
+        cleaned_int16 = np.clip(cleaned_float * 32768.0, -32768, 32767).astype(np.int16)
+        cleaned_audio = audio._spawn(cleaned_int16.tobytes())
+        cleaned_audio = normalize(cleaned_audio)
 
-        print("Normalizing audio levels...")
-        audio = normalize(audio)
-
-        print(f"Exporting final master to {output_path}...")
-        audio.export(output_path, format="wav")
+        cleaned_audio.export(output_path, format="wav")
 
         return output_path
-class Transcriber:
-    """
-    An OOP based pipeline for transcribing DIP Group 24's interviews.
-    Authored by: Parv (Group 24)
-    """
 
-    def __init__(self, hf_token: str):
-        self.hf_token: str = hf_token
 
-        if torch.cuda.is_available():
-            self.device: str = "cuda"
-            self.compute_type: str = "float16"
-            print("NVIDIA GPU detected. Running in high-speed CUDA mode.")
-        else:
-            self.device: str = "cpu"
-            self.compute_type: str = "int8"
-            print("No NVIDIA GPU detected. Falling back to CPU mode (this will be slow).")
+class WhisperXPipeline:
+    def __init__(self, hf_token: str, device_config: DeviceConfig):
+        self.hf_token = hf_token
+        self.device_config = device_config
 
-    def free_vram(self) -> None:
+    @staticmethod
+    def _free_memory() -> None:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     def transcribe_and_align(self, audio_path: str, batch_size: int = 8) -> Dict[str, Any]:
-        model: Any = whisperx.load_model("large-v3", self.device, compute_type=self.compute_type)
-        audio: Any = whisperx.load_audio(audio_path)
+        model = whisperx.load_model(
+            "large-v3",
+            self.device_config.device,
+            compute_type=self.device_config.compute_type,
+        )
+        audio = whisperx.load_audio(audio_path)
 
         result: Dict[str, Any] = model.transcribe(audio, batch_size=batch_size)
-        self.free_vram()
+        self._free_memory()
 
-        model_a, metadata = whisperx.load_align_model(language_code=result["language"], device=self.device)
-        result = whisperx.align(result["segments"], model_a, metadata, audio, self.device, return_char_alignments=False)
-        self.free_vram()
+        model_a, metadata = whisperx.load_align_model(
+            language_code=result["language"],
+            device=self.device_config.device,
+        )
+        result = whisperx.align(
+            result["segments"],
+            model_a,
+            metadata,
+            audio,
+            self.device_config.device,
+            return_char_alignments=False,
+        )
+        self._free_memory()
 
         return result
 
-    def diarize(self, audio_path: str) -> Any:
-        """Handles speaker clustering using Pyannote."""
+    def diarize(self, audio_path: str):
         audio = whisperx.load_audio(audio_path)
-        diarize_model = whisperx.DiarizationPipeline(use_auth_token=self.hf_token, device=self.device)
-        diarize_segments = diarize_model(audio)
-        self.free_vram()
-        
-        return diarize_segments
+        diarize_model = whisperx.DiarizationPipeline(
+            use_auth_token=self.hf_token,
+            device=self.device_config.device,
+        )
+        diarization = diarize_model(audio)
+        self._free_memory()
+        return diarization
 
-    def process_interview(self, audio_path: str) -> List[Dict[str, Any]]:
-        with tqdm(total=4, desc="Processing Pipeline", bar_format="{l_bar}{bar} [ time left: {remaining} ]") as pbar:
+
+class InterviewTranscriptionService:
+    """Independent transcription pipeline (audio prep -> ASR -> diarization -> merge)."""
+
+    def __init__(self, hf_token: str, preferred_gpu_name: str = "RX5700"):
+        self.audio_processor = AudioProcessor()
+        self.device_config = HardwareSelector(preferred_gpu_name).select()
+        self.whisper_pipeline = WhisperXPipeline(hf_token, self.device_config)
+
+    def transcribe_interview(self, audio_path: str, test_duration_sec: Optional[int] = None) -> List[Dict[str, Any]]:
+        cleaned_path = self.audio_processor.process_file(audio_path, test_duration_sec=test_duration_sec)
+
+        with tqdm(total=4, desc="Transcription Pipeline", bar_format="{l_bar}{bar} [ time left: {remaining} ]") as pbar:
             pbar.set_description("Transcribing Audio")
-            transcript_result: Dict[str, Any] = self.transcribe_and_align(audio_path)
-            pbar.update(1)  # Step 1
+            transcript_result = self.whisper_pipeline.transcribe_and_align(cleaned_path)
+            pbar.update(1)
 
             pbar.set_description("Clustering Speakers")
-            diarization_result = self.diarize(audio_path)
-            pbar.update(1)  # Step 2
+            diarization_result = self.whisper_pipeline.diarize(cleaned_path)
+            pbar.update(1)
 
             pbar.set_description("Merging Timestamps")
-            final_result: Dict[str, Any] = whisperx.assign_word_speakers(diarization_result, transcript_result)
-            pbar.update(1)  # Step 3
+            final_result = whisperx.assign_word_speakers(diarization_result, transcript_result)
+            pbar.update(1)
 
             pbar.set_description("Finalizing")
-            pbar.update(1)  # Step 4
+            pbar.update(1)
 
         return final_result["segments"]
 
 
-if __name__ == "__main__":
-    ACCESS_TOKEN = "e6itqaPMdDfti6Gn3F75BSGQ6vegXBb7ADBpQkpq32A="
-    AUDIO_FILE = r"C:\F DRIVE\Python\DIP Statistical analysis\transcription_model\Interviews\navdeep_interview-01.wav"
+def main() -> None:
+    access_token = os.getenv("HF_ACCESS_TOKEN")
+    audio_file = os.getenv("INTERVIEW_AUDIO_FILE")
 
-    preprocessor = AudioProcessor()
-    transcriber = Transcriber(ACCESS_TOKEN)
-    AUDIO_FILE = preprocessor.process_file(AUDIO_FILE, test_duration_sec=60)
-    segments = transcriber.process_interview(AUDIO_FILE)
+    if not access_token or not audio_file:
+        raise RuntimeError("Set HF_ACCESS_TOKEN and INTERVIEW_AUDIO_FILE environment variables before running.")
 
-    with open(f"{AUDIO_FILE}_transcription.txt", 'x') as f:
-        print(f"Created transcript file: {AUDIO_FILE}.\nTranscribing...")
+    service = InterviewTranscriptionService(hf_token=access_token, preferred_gpu_name="RX5700")
+    segments = service.transcribe_interview(audio_file, test_duration_sec=60)
 
+    output_path = f"{audio_file}_transcription.txt"
+    with open(output_path, "w", encoding="utf-8") as file:
         for segment in segments:
-            speaker: str = segment.get("speaker", "UNKNOWN")
-            text: str = segment.get("text", "").strip()
+            speaker = segment.get("speaker", "UNKNOWN")
+            text = segment.get("text", "").strip()
+            file.write(f"[{speaker}]: {text}\n")
 
-            print(f"[{speaker}]: {text}")
-            f.write(f"[{speaker}]: {text}")
+    print(f"Created transcript file: {output_path}")
+
+
+if __name__ == "__main__":
+    main()

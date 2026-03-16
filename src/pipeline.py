@@ -1,185 +1,212 @@
-import os
 import glob
+import os
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
+
 import numpy as np
 
-from histogram import extract_histograms_rgb, extract_histograms_hsv, flatten_hist_list
+from histogram import extract_histograms_hsv, extract_histograms_rgb
 from preprocessing import preprocess_image
-from similarity import combined_similarity, hue_hist_to_unit_vectors
+from similarity import combined_similarity
 from visualisation import plot_histogram_overlay, plot_hue_overlay
 
-# --- Configuration ---
-DATA_DIR = 'data'
-RESULTS_DIR = 'results'
-BOLLYWOOD_DIR = os.path.join(DATA_DIR, 'bollywood')
-FIELD_DIR = os.path.join(DATA_DIR, 'field')
-PROCESSED_DIR = os.path.join(DATA_DIR, 'processed')
 
-def process_dataset(image_paths: list, dataset_name: str):
-    """
-    Processes images and returns:
-      - avg_hist_rgb: list of 3 arrays (R,G,B) normalized
-      - avg_hist_hsv: list of 3 arrays (H,S,V) normalized
-      - hue_degs_list: concatenated hue degrees (0..360) for KDE plotting
-      - pixel_arrays_rgb: list of arrays per channel for RGB KDE
-    """
-    print(f"--- Processing {dataset_name} dataset ---")
-    all_hists_rgb = []
-    all_hists_hsv = []
-    hue_angles = []  # degrees
-    pixel_arrays_rgb = [[], [], []]
+@dataclass(frozen=True)
+class ImagePipelineConfig:
+    data_dir: str = "data"
+    results_dir: str = "results"
+    bollywood_folder: str = "bollywood"
+    field_folder: str = "field"
+    processed_folder: str = "processed"
+    weights: Tuple[float, float, float] = (0.6, 0.2, 0.2)
 
-    output_dir = os.path.join(PROCESSED_DIR, dataset_name)
-    os.makedirs(output_dir, exist_ok=True)
 
-    for img_path in image_paths:
-        img_rgb, img_hsv = preprocess_image(img_path, output_dir)
-        if img_rgb is None:
-            continue
+@dataclass
+class DatasetArtifacts:
+    avg_rgb_hist: List[np.ndarray]
+    avg_hsv_hist: List[np.ndarray]
+    hue_degrees: np.ndarray
+    rgb_pixels: List[np.ndarray]
 
-        hists_rgb = extract_histograms_rgb(img_rgb, bins=256)
-        hists_hsv = extract_histograms_hsv(img_hsv, H_bins=36, S_bins=10, V_bins=10)
 
-        all_hists_rgb.append(hists_rgb)
-        all_hists_hsv.append(hists_hsv)
+class ImageDatasetProcessor:
+    """Sequential processor that takes images from disk to statistical representations."""
 
-        # collect hue degrees for KDE plotting (OpenCV hue H in 0..179 -> degrees = H * 2)
-        h_flat = img_hsv[:, :, 0].flatten().astype(float)
-        hue_deg = h_flat * 2.0  # 0..358
-        hue_angles.extend(hue_deg.tolist())
+    def __init__(self, config: ImagePipelineConfig):
+        self.config = config
 
-        # collect RGB pixels for KDE
-        for i in range(3):
-            pixel_arrays_rgb[i].extend(img_rgb[:, :, i].flatten().tolist())
+    def load_image_paths(self, dataset_name: str) -> List[str]:
+        folder = os.path.join(self.config.data_dir, dataset_name)
+        paths = glob.glob(os.path.join(folder, "*.*"))
+        return sorted(paths)
 
-    # average histograms across images
-    if all_hists_rgb:
-        avg_hist_rgb = [np.mean([img_hist[ch] for img_hist in all_hists_rgb], axis=0) for ch in range(3)]
-    else:
-        avg_hist_rgb = [np.zeros(256), np.zeros(256), np.zeros(256)]
+    def process_dataset(self, image_paths: List[str], dataset_name: str) -> DatasetArtifacts:
+        print(f"--- Processing {dataset_name} dataset ---")
 
-    if all_hists_hsv:
-        avg_hist_hsv = [np.mean([img_hist[ch] for img_hist in all_hists_hsv], axis=0) for ch in range(3)]
-    else:
-        avg_hist_hsv = [np.zeros(36), np.zeros(10), np.zeros(10)]
+        all_hists_rgb: List[List[np.ndarray]] = []
+        all_hists_hsv: List[List[np.ndarray]] = []
+        hue_angles: List[float] = []
+        pixel_arrays_rgb: List[List[float]] = [[], [], []]
 
-    # convert pixel arrays to numpy arrays
-    pixel_arrays_rgb = [np.array(arr) if len(arr) else np.array([]) for arr in pixel_arrays_rgb]
-    hue_angles = np.array(hue_angles) if len(hue_angles) else np.array([])
+        output_dir = os.path.join(self.config.data_dir, self.config.processed_folder, dataset_name)
+        os.makedirs(output_dir, exist_ok=True)
 
-    return avg_hist_rgb, avg_hist_hsv, hue_angles, pixel_arrays_rgb
+        for img_path in image_paths:
+            img_rgb, img_hsv = preprocess_image(img_path, output_dir)
+            if img_rgb is None or img_hsv is None:
+                continue
 
-def summarize_results(metrics, avg_h_bwood, avg_h_field, out_path):
-    """
-    Write human-readable summary with per-channel metrics and combined score.
-    metrics: dict returned from combined_similarity (see similarity.py)
-    avg_h_bwood/avg_h_field: average hue histograms (for reporting mean angles)
-    """
-    # compute circular means for readable labels
-    def circular_mean_deg(h_hist):
-        N = len(h_hist)
-        if h_hist.sum() == 0:
-            return None
-        bin_centers_deg = (np.arange(N) + 0.5) * (360.0 / N)
-        angles_rad = np.deg2rad(bin_centers_deg)
-        x = np.sum(h_hist * np.cos(angles_rad))
-        y = np.sum(h_hist * np.sin(angles_rad))
-        mean_angle = (np.rad2deg(np.arctan2(y, x))) % 360
-        R = np.sqrt(x**2 + y**2)
-        return mean_angle, R
+            hists_rgb = extract_histograms_rgb(img_rgb, bins=256)
+            hists_hsv = extract_histograms_hsv(img_hsv, H_bins=36, S_bins=10, V_bins=10)
 
-    mean_bwood = circular_mean_deg(avg_h_bwood)
-    mean_field = circular_mean_deg(avg_h_field)
+            all_hists_rgb.append(hists_rgb)
+            all_hists_hsv.append(hists_hsv)
 
-    lines = []
-    lines.append("=== Quantitative Color Analysis Summary ===\n")
-    lines.append(f"Combined similarity score (0..1; higher = more similar): {metrics['combined_score']:.4f}\n")
-    lines.append("Per-channel metrics:\n")
-    lines.append(f" - Hue circular cosine similarity (0..1): {metrics['hue_sim_circular_cosine_0_1']:.4f}\n")
-    lines.append(f" - Hue circular EMD normalized (0..1; smaller=more similar): {metrics['hue_emd_norm_0_1']:.4f}\n")
-    lines.append(f" - Saturation cosine: {metrics['sat_cos']:.4f}, sat JSD: {metrics['sat_jsd']:.4f}, sat combined sim: {metrics['sat_sim_combined']:.4f}\n")
-    lines.append(f" - Value cosine: {metrics['val_cos']:.4f}, val JSD: {metrics['val_jsd']:.4f}, val combined sim: {metrics['val_sim_combined']:.4f}\n\n")
+            h_flat = img_hsv[:, :, 0].flatten().astype(float)
+            hue_angles.extend((h_flat * 2.0).tolist())
 
-    if mean_bwood is not None and mean_field is not None:
-        lines.append(f"Dominant hue (Bollywood): {mean_bwood[0]:.1f}° (concentration R={mean_bwood[1]:.3f})\n")
-        lines.append(f"Dominant hue (Field):     {mean_field[0]:.1f}° (concentration R={mean_field[1]:.3f})\n")
+            for channel in range(3):
+                pixel_arrays_rgb[channel].extend(img_rgb[:, :, channel].flatten().tolist())
 
-    # interpretative sentence (brief)
-    lines.append("\nInterpretation:\n")
-    lines.append(" - A high combined score indicates the two palettes share a common warm/cool tendency.\n")
-    lines.append(" - Hue metrics capture 'color family' closeness (e.g., reds/oranges vs magentas). Saturation and Value capture vividness and brightness differences.\n")
-    lines.append("\nEnd of summary.\n")
+        avg_rgb = self._average_histograms(all_hists_rgb, default_sizes=[256, 256, 256])
+        avg_hsv = self._average_histograms(all_hists_hsv, default_sizes=[36, 10, 10])
 
-    with open(out_path, 'w') as f:
-        f.writelines(lines)
-    print(f"Saved textual summary to {out_path}")
-    return "\n".join(lines)
+        return DatasetArtifacts(
+            avg_rgb_hist=avg_rgb,
+            avg_hsv_hist=avg_hsv,
+            hue_degrees=np.asarray(hue_angles, dtype=float) if hue_angles else np.array([]),
+            rgb_pixels=[np.asarray(arr, dtype=float) if arr else np.array([]) for arr in pixel_arrays_rgb],
+        )
 
-def main():
-    print("Starting Wedding Color Analysis Pipeline...")
+    @staticmethod
+    def _average_histograms(histograms: List[List[np.ndarray]], default_sizes: List[int]) -> List[np.ndarray]:
+        if not histograms:
+            return [np.zeros(size, dtype=float) for size in default_sizes]
+        return [np.mean([h[channel] for h in histograms], axis=0) for channel in range(3)]
 
-    bollywood_images = glob.glob(os.path.join(BOLLYWOOD_DIR, '*.*'))
-    field_images = glob.glob(os.path.join(FIELD_DIR, '*.*'))
 
-    if not bollywood_images or not field_images:
-        print("Error: Ensure there are images in both 'data/bollywood' and 'data/field' directories.")
-        return
-    
-    print(f"DEBUG: Found {len(bollywood_images)} files in {BOLLYWOOD_DIR}")
-    print(f"DEBUG: Found {len(field_images)} files in {FIELD_DIR}")
+class SimilarityReporter:
+    @staticmethod
+    def summarize(metrics: Dict[str, float], avg_h_bwood: np.ndarray, avg_h_field: np.ndarray, out_path: str) -> str:
+        def circular_mean_deg(h_hist: np.ndarray):
+            if np.sum(h_hist) <= 0:
+                return None
+            n_bins = len(h_hist)
+            bin_centers_deg = (np.arange(n_bins) + 0.5) * (360.0 / n_bins)
+            angles_rad = np.deg2rad(bin_centers_deg)
+            x = np.sum(h_hist * np.cos(angles_rad))
+            y = np.sum(h_hist * np.sin(angles_rad))
+            mean_angle = float(np.rad2deg(np.arctan2(y, x)) % 360)
+            concentration = float(np.sqrt(x**2 + y**2))
+            return mean_angle, concentration
 
-    if len(bollywood_images) == 0:
-        print("CRITICAL ERROR: No images found for Bollywood. Check the folder path and permissions.")
+        mean_bwood = circular_mean_deg(avg_h_bwood)
+        mean_field = circular_mean_deg(avg_h_field)
 
-    # Process datasets
-    avg_rgb_bwood, avg_hsv_bwood, hue_deg_bwood, pixels_rgb_bwood = process_dataset(bollywood_images, 'bollywood')
-    avg_rgb_field, avg_hsv_field, hue_deg_field, pixels_rgb_field = process_dataset(field_images, 'field')
+        lines = [
+            "=== Quantitative Color Analysis Summary ===\n",
+            f"Combined similarity score (0..1; higher = more similar): {metrics['combined_score']:.4f}\n",
+            "Per-channel metrics:\n",
+            f" - Hue circular cosine similarity (0..1): {metrics['hue_sim_circular_cosine_0_1']:.4f}\n",
+            f" - Hue circular EMD normalized (0..1; smaller=more similar): {metrics['hue_emd_norm_0_1']:.4f}\n",
+            f" - Saturation cosine: {metrics['sat_cos']:.4f}, sat JSD: {metrics['sat_jsd']:.4f}, sat combined sim: {metrics['sat_sim_combined']:.4f}\n",
+            f" - Value cosine: {metrics['val_cos']:.4f}, val JSD: {metrics['val_jsd']:.4f}, val combined sim: {metrics['val_sim_combined']:.4f}\n\n",
+        ]
 
-    def has_data(hist_list):
-        return all(h.sum() > 0 for h in hist_list)
-    
-    if not has_data(avg_hsv_bwood) or not has_data(avg_hsv_field):
-        print("\n!!! CRITICAL ERROR: One of your datasets has no valid image data. !!!")
-        print("Check the 'CRITICAL: OpenCV failed to decode' logs above.")
-        print("The pipeline cannot compare an empty dataset. Analysis stopped.")
-        return
-    # Compute combined similarity on HSV average histograms
-    # Unpack H,S,V histograms
-    h1, s1, v1 = avg_hsv_bwood
-    h2, s2, v2 = avg_hsv_field
+        if mean_bwood and mean_field:
+            lines.append(
+                f"Dominant hue (Bollywood): {mean_bwood[0]:.1f}° (concentration R={mean_bwood[1]:.3f})\n"
+            )
+            lines.append(
+                f"Dominant hue (Field):     {mean_field[0]:.1f}° (concentration R={mean_field[1]:.3f})\n"
+            )
 
-    combined_score, metrics = combined_similarity(h1, s1, v1, h2, s2, v2, weights=(0.6, 0.2, 0.2))
+        lines.extend(
+            [
+                "\nInterpretation:\n",
+                " - A high combined score indicates the two palettes share a common warm/cool tendency.\n",
+                " - Hue metrics capture color-family closeness. Saturation and Value capture vividness and brightness differences.\n",
+                "\nEnd of summary.\n",
+            ]
+        )
 
-    # --- Visualizations ---
-    os.makedirs(os.path.join(RESULTS_DIR, 'histograms'), exist_ok=True)
-    os.makedirs(os.path.join(RESULTS_DIR, 'kde'), exist_ok=True)
-    os.makedirs(os.path.join(RESULTS_DIR, 'summary'), exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as file:
+            file.writelines(lines)
+        print(f"Saved textual summary to {out_path}")
+        return "".join(lines)
 
-    # Histogram overlays (RGB)
-    hist_path = os.path.join(RESULTS_DIR, 'histograms', 'rgb_histogram_overlay.png')
-    plot_histogram_overlay(avg_rgb_bwood, avg_rgb_field, channel_names=['R','G','B'],
-                           output_path=hist_path, x_limits=(0,255),
-                           title='RGB Histogram Comparison: Bollywood vs Field')
 
-    # Hue KDE overlay (with wrap)
-    hue_kde_path = os.path.join(RESULTS_DIR, 'kde', 'hue_kde_overlay.png')
-    plot_hue_overlay(hue_deg_bwood, hue_deg_field, hue_kde_path, title='Hue KDE (wrap) - Bollywood vs Field')
+class ImageSimilarityPipeline:
+    def __init__(self, config: ImagePipelineConfig):
+        self.config = config
+        self.processor = ImageDatasetProcessor(config)
+        self.reporter = SimilarityReporter()
 
-    # Save textual summary
-    summary_path = os.path.join(RESULTS_DIR, 'summary', 'analysis_summary.txt')
-    summary_text = summarize_results(metrics, h1, h2, summary_path)
-    print("\n" + summary_text)
+    def run(self) -> None:
+        print("Starting Wedding Color Analysis Pipeline...")
 
-if __name__ == '__main__':
+        bollywood_paths = self.processor.load_image_paths(self.config.bollywood_folder)
+        field_paths = self.processor.load_image_paths(self.config.field_folder)
+
+        if not bollywood_paths or not field_paths:
+            raise RuntimeError("Ensure both datasets contain images under data/bollywood and data/field.")
+
+        print(f"Found {len(bollywood_paths)} files in {self.config.bollywood_folder}")
+        print(f"Found {len(field_paths)} files in {self.config.field_folder}")
+
+        bollywood = self.processor.process_dataset(bollywood_paths, self.config.bollywood_folder)
+        field = self.processor.process_dataset(field_paths, self.config.field_folder)
+
+        if not self._has_valid_hsv_data(bollywood.avg_hsv_hist, field.avg_hsv_hist):
+            raise RuntimeError("One dataset has no valid HSV histogram data after preprocessing.")
+
+        h1, s1, v1 = bollywood.avg_hsv_hist
+        h2, s2, v2 = field.avg_hsv_hist
+        _, metrics = combined_similarity(h1, s1, v1, h2, s2, v2, weights=self.config.weights)
+
+        hist_dir = os.path.join(self.config.results_dir, "histograms")
+        kde_dir = os.path.join(self.config.results_dir, "kde")
+        summary_dir = os.path.join(self.config.results_dir, "summary")
+        os.makedirs(hist_dir, exist_ok=True)
+        os.makedirs(kde_dir, exist_ok=True)
+        os.makedirs(summary_dir, exist_ok=True)
+
+        plot_histogram_overlay(
+            bollywood.avg_rgb_hist,
+            field.avg_rgb_hist,
+            channel_names=["R", "G", "B"],
+            output_path=os.path.join(hist_dir, "rgb_histogram_overlay.png"),
+            x_limits=(0, 255),
+            title="RGB Histogram Comparison: Bollywood vs Field",
+        )
+
+        plot_hue_overlay(
+            bollywood.hue_degrees,
+            field.hue_degrees,
+            os.path.join(kde_dir, "hue_kde_overlay.png"),
+            title="Hue KDE (wrap) - Bollywood vs Field",
+        )
+
+        summary_text = self.reporter.summarize(
+            metrics,
+            h1,
+            h2,
+            os.path.join(summary_dir, "analysis_summary.txt"),
+        )
+        print("\n" + summary_text)
+
+    @staticmethod
+    def _has_valid_hsv_data(*datasets: List[np.ndarray]) -> bool:
+        for channels in datasets:
+            if any(np.sum(channel) <= 0 for channel in channels):
+                return False
+        return True
+
+
+def main() -> None:
+    pipeline = ImageSimilarityPipeline(ImagePipelineConfig())
+    pipeline.run()
+
+
+if __name__ == "__main__":
     main()
-
-
-
-
-"""
-The task of quantitative analysis of images is handled by a python application.
-The python app contains data collection, processing, feature extraction, and mathematical utilities to generate a meaningful analysis. 
-Key files are:
-
-1. preprocessing.py: This file handles the initial preparation of raw images. All images from the dataset are standardised to a fixed size (256x256 px), from which both RGB and HSV images are extracted.
-
-"""
