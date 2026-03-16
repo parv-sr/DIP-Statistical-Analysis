@@ -35,38 +35,58 @@ def circular_cosine_similarity(h1, h2):
     sim01 = (sim + 1.0) / 2.0
     return sim01
 
+
 def circular_wasserstein(h1, h2):
     """
     Compute a rotation-aware 1D Wasserstein (EMD) distance on hue histograms by circularly aligning bins.
     Returns minimal Wasserstein distance across all circular shifts of h2.
-    Smaller = more similar. This is in units of bin-index; you may normalize if you like.
+    Safeguards added: ensures non-empty, finite probability distributions.
     """
+
     N = len(h1)
     positions = np.arange(N)
-    min_d = float('inf')
-    # Make sure input histograms are probability distributions
-    p = h1.astype(float)
-    q = h2.astype(float)
-    if p.sum() > 0:
-        p = p / p.sum()
-    if q.sum() > 0:
-        q = q / q.sum()
+
+    # Convert to float arrays
+    p = np.nan_to_num(h1.astype(float), nan=0.0, posinf=0.0, neginf=0.0)
+    q = np.nan_to_num(h2.astype(float), nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Safe normalization function
+    def safe_normalize(hist):
+        total = np.sum(hist)
+        if total <= 0 or not np.isfinite(total):
+            # fallback: uniform distribution
+            return np.ones_like(hist) / len(hist)
+        return hist / total
+
+    p = safe_normalize(p)
+    q = safe_normalize(q)
+
+    min_d = float("inf")
+
+    # Try all circular shifts of q
     for r in range(N):
         q_roll = np.roll(q, r)
         d = wasserstein_distance(positions, positions, u_weights=p, v_weights=q_roll)
         if d < min_d:
             min_d = d
+
     # Normalize by maximum possible distance (N/2) -> map to 0..1
     return min_d / (N / 2.0)
 
 # ---- Saturation & Value comparison ----
 def jensen_shannon_channel(p, q):
-    # p, q are probability vectors (sum to 1)
-    if p.sum() > 0:
-        p = p / p.sum()
-    if q.sum() > 0:
-        q = q / q.sum()
-    return jensenshannon(p, q)  # returns a distance in [0, 1]
+    p_sum = p.sum()
+    q_sum = q.sum()
+
+    if p_sum == 0 or q_sum == 0:
+        return 1.0
+    
+    p_norm = p/p_sum
+    q_norm = q/q_sum
+    
+    result = jensenshannon(p_norm, q_norm)
+
+    return 1.0 if np.isnan(result) else float(result)
 
 def cosine_similarity_flat(p, q):
     """
@@ -75,11 +95,12 @@ def cosine_similarity_flat(p, q):
     p = p.flatten().astype(float)
     q = q.flatten().astype(float)
     denom = (np.linalg.norm(p) * np.linalg.norm(q))
-    if denom == 0:
+    if denom < 1e-10:
         return 0.0
+    
     sim = np.dot(p, q) / denom
     # Clip numeric noise
-    return float(np.clip(sim, -1.0, 1.0))
+    return float(np.clip(sim, 0.0, 1.0))
 
 # ---- Combined similarity ----
 def combined_similarity(h1, s1, v1, h2, s2, v2, weights=(0.6, 0.2, 0.2)):

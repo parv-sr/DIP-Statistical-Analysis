@@ -1,5 +1,6 @@
 import cv2
 import os
+import numpy as np
 
 def preprocess_image(image_path: str, output_dir: str, size: tuple = (256, 256)):
     """
@@ -15,10 +16,12 @@ def preprocess_image(image_path: str, output_dir: str, size: tuple = (256, 256))
         Returns (None, None) if the image cannot be read.
     """
     try:
-        # Read image in BGR format
-        image_bgr = cv2.imread(image_path)
+        with open(image_path, "rb") as f:
+            chunk = np.frombuffer(f.read(), dtype=np.uint8)
+            image_bgr = cv2.imdecode(chunk, cv2.IMREAD_COLOR)
+
         if image_bgr is None:
-            print(f"Warning: Could not read image at {image_path}. Skipping.")
+            print(f"CRITICAL: OpenCV failed to decode {image_path}")
             return None, None
 
         # Resize the image

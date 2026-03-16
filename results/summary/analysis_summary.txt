@@ -1,0 +1,16 @@
+=== Quantitative Color Analysis Summary ===
+Combined similarity score (0..1; higher = more similar): 0.9567
+Per-channel metrics:
+ - Hue circular cosine similarity (0..1): 1.0000
+ - Hue circular EMD normalized (0..1; smaller=more similar): 0.1070
+ - Saturation cosine: 0.9244, sat JSD: 0.1475, sat combined sim: 0.8885
+ - Value cosine: 0.9304, val JSD: 0.1403, val combined sim: 0.8951
+
+Dominant hue (Bollywood): 17.8° (concentration R=0.846)
+Dominant hue (Field):     18.4° (concentration R=0.642)
+
+Interpretation:
+ - A high combined score indicates the two palettes share a common warm/cool tendency.
+ - Hue metrics capture 'color family' closeness (e.g., reds/oranges vs magentas). Saturation and Value capture vividness and brightness differences.
+
+End of summary.

@@ -123,11 +123,25 @@ def main():
     if not bollywood_images or not field_images:
         print("Error: Ensure there are images in both 'data/bollywood' and 'data/field' directories.")
         return
+    
+    print(f"DEBUG: Found {len(bollywood_images)} files in {BOLLYWOOD_DIR}")
+    print(f"DEBUG: Found {len(field_images)} files in {FIELD_DIR}")
+
+    if len(bollywood_images) == 0:
+        print("CRITICAL ERROR: No images found for Bollywood. Check the folder path and permissions.")
 
     # Process datasets
     avg_rgb_bwood, avg_hsv_bwood, hue_deg_bwood, pixels_rgb_bwood = process_dataset(bollywood_images, 'bollywood')
     avg_rgb_field, avg_hsv_field, hue_deg_field, pixels_rgb_field = process_dataset(field_images, 'field')
 
+    def has_data(hist_list):
+        return all(h.sum() > 0 for h in hist_list)
+    
+    if not has_data(avg_hsv_bwood) or not has_data(avg_hsv_field):
+        print("\n!!! CRITICAL ERROR: One of your datasets has no valid image data. !!!")
+        print("Check the 'CRITICAL: OpenCV failed to decode' logs above.")
+        print("The pipeline cannot compare an empty dataset. Analysis stopped.")
+        return
     # Compute combined similarity on HSV average histograms
     # Unpack H,S,V histograms
     h1, s1, v1 = avg_hsv_bwood
@@ -157,3 +171,15 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+
+
+"""
+The task of quantitative analysis of images is handled by a python application.
+The python app contains data collection, processing, feature extraction, and mathematical utilities to generate a meaningful analysis. 
+Key files are:
+
+1. preprocessing.py: This file handles the initial preparation of raw images. All images from the dataset are standardised to a fixed size (256x256 px), from which both RGB and HSV images are extracted.
+
+"""

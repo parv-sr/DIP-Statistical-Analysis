@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from typing import List
 
 def extract_histograms_rgb(image_rgb: np.ndarray, bins: int = 256):
     """
@@ -23,23 +24,25 @@ def extract_histograms_hsv(image_hsv: np.ndarray, H_bins: int = 36, S_bins: int 
     Hue range in OpenCV: 0..179. We'll treat that as 0..360 by mapping bin centers later if needed.
     Returns list: [H_hist, S_hist, V_hist], each sums to 1.
     """
-    h = image_hsv[:, :, 0].flatten()  # 0..179
-    s = image_hsv[:, :, 1].flatten()  # 0..255
-    v = image_hsv[:, :, 2].flatten()  # 0..255
+    h = image_hsv[:, :, 0].flatten()  
+    s = image_hsv[:, :, 1].flatten()  
+    v = image_hsv[:, :, 2].flatten()  
 
-    H_hist, _ = np.histogram(h, bins=H_bins, range=(0, 180), density=False)
-    S_hist, _ = np.histogram(s, bins=S_bins, range=(0, 256), density=False)
-    V_hist, _ = np.histogram(v, bins=V_bins, range=(0, 256), density=False)
+    # 1. Extract raw counts
+    H_hist, _ = np.histogram(h, bins=H_bins, range=(0, 180))
+    S_hist, _ = np.histogram(s, bins=S_bins, range=(0, 256))
+    V_hist, _ = np.histogram(v, bins=V_bins, range=(0, 256))
 
-    # normalize to sum=1
+    processed_hists = []
     for hist in (H_hist, S_hist, V_hist):
-        hist_sum = hist.sum()
-        if hist_sum > 0:
-            hist[:] = hist.astype(float) / hist_sum
-        else:
-            hist[:] = 0.0
+        # 2. Convert to float BEFORE division to avoid integer truncation
+        f_hist = hist.astype(float)
+        total = f_hist.sum()
+        if total > 0:
+            f_hist /= total
+        processed_hists.append(f_hist)
 
-    return [H_hist.astype(float), S_hist.astype(float), V_hist.astype(float)]
+    return processed_hists
 
 def flatten_hist_list(hist_list):
     """
