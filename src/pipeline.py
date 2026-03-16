@@ -5,10 +5,10 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-from histogram import extract_histograms_hsv, extract_histograms_rgb
-from preprocessing import preprocess_image
-from similarity import combined_similarity
-from visualisation import plot_histogram_overlay, plot_hue_overlay
+from src.histogram import extract_histograms_hsv, extract_histograms_rgb
+from src.preprocessing import preprocess_image
+from src.similarity import combined_similarity
+from src.visualisation import plot_histogram_overlay, plot_hue_overlay
 
 
 @dataclass(frozen=True)
@@ -144,7 +144,7 @@ class ImageSimilarityPipeline:
         self.processor = ImageDatasetProcessor(config)
         self.reporter = SimilarityReporter()
 
-    def run(self) -> None:
+    def run(self) -> str:
         print("Starting Wedding Color Analysis Pipeline...")
 
         bollywood_paths = self.processor.load_image_paths(self.config.bollywood_folder)
@@ -196,6 +196,7 @@ class ImageSimilarityPipeline:
             os.path.join(summary_dir, "analysis_summary.txt"),
         )
         print("\n" + summary_text)
+        return summary_text
 
     @staticmethod
     def _has_valid_hsv_data(*datasets: List[np.ndarray]) -> bool:

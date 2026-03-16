@@ -1,5 +1,6 @@
 import gc
 import os
+import wave
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -89,8 +90,39 @@ class AudioProcessor:
         cleaned_audio = normalize(cleaned_audio)
 
         cleaned_audio.export(output_path, format="wav")
-
         return output_path
+
+
+def load_wav_mono_16k(audio_path: str, target_sample_rate: int = 16000) -> np.ndarray:
+    """
+    Load mono 16-bit PCM WAV without invoking ffmpeg.
+    This avoids whisperx.load_audio subprocess dependency on ffmpeg executables.
+    """
+    if not os.path.exists(audio_path):
+        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+    with wave.open(audio_path, "rb") as wav_file:
+        channels = wav_file.getnchannels()
+        sample_width = wav_file.getsampwidth()
+        sample_rate = wav_file.getframerate()
+        frame_count = wav_file.getnframes()
+        raw = wav_file.readframes(frame_count)
+
+    if sample_width != 2:
+        raise ValueError(
+            f"Expected 16-bit PCM WAV after preprocessing, got sample width={sample_width} bytes."
+        )
+    if sample_rate != target_sample_rate:
+        raise ValueError(
+            f"Expected sample rate {target_sample_rate}Hz after preprocessing, got {sample_rate}Hz."
+        )
+
+    samples = np.frombuffer(raw, dtype=np.int16)
+    if channels > 1:
+        samples = samples.reshape(-1, channels).mean(axis=1).astype(np.int16)
+
+    audio = samples.astype(np.float32) / 32768.0
+    return np.clip(audio, -1.0, 1.0)
 
 
 class WhisperXPipeline:
@@ -110,7 +142,7 @@ class WhisperXPipeline:
             self.device_config.device,
             compute_type=self.device_config.compute_type,
         )
-        audio = whisperx.load_audio(audio_path)
+        audio = load_wav_mono_16k(audio_path)
 
         result: Dict[str, Any] = model.transcribe(audio, batch_size=batch_size)
         self._free_memory()
@@ -128,11 +160,10 @@ class WhisperXPipeline:
             return_char_alignments=False,
         )
         self._free_memory()
-
         return result
 
     def diarize(self, audio_path: str):
-        audio = whisperx.load_audio(audio_path)
+        audio = load_wav_mono_16k(audio_path)
         diarize_model = whisperx.DiarizationPipeline(
             use_auth_token=self.hf_token,
             device=self.device_config.device,
