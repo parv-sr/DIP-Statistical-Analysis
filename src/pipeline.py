@@ -37,8 +37,10 @@ class ImageDatasetProcessor:
 
     def load_image_paths(self, dataset_name: str) -> List[str]:
         folder = os.path.join(self.config.data_dir, dataset_name)
-        paths = glob.glob(os.path.join(folder, "*.*"))
-        return sorted(paths)
+        # Use recursive globbing to find files in all subdirectories
+        paths = glob.glob(os.path.join(folder, "**", "*.*"), recursive=True)
+        # Filter out any directories that might accidentally match the *.* pattern
+        return sorted([p for p in paths if os.path.isfile(p)])
 
     def process_dataset(self, image_paths: List[str], dataset_name: str) -> DatasetArtifacts:
         print(f"--- Processing {dataset_name} dataset ---")
