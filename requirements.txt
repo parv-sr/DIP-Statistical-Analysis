@@ -7,3 +7,6 @@ opencv-python
 scipy
 tqdm
 seaborn
+transformers
+sentencepiece
+accelerate
