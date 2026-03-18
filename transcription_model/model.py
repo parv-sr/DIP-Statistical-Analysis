@@ -1,3 +1,6 @@
+import os 
+os.environ["HSA_OVERRIDE_GFX_VERSION"] = "10.3.0"
+
 import gc
 import os
 import wave
@@ -163,8 +166,9 @@ class WhisperXPipeline:
         return result
 
     def diarize(self, audio_path: str):
+        from whisperx.diarize import DiarizationPipeline
         audio = load_wav_mono_16k(audio_path)
-        diarize_model = whisperx.DiarizationPipeline(
+        diarize_model = DiarizationPipeline(
             use_auth_token=self.hf_token,
             device=self.device_config.device,
         )
@@ -208,7 +212,9 @@ def main() -> None:
     audio_file = os.getenv("INTERVIEW_AUDIO_FILE")
 
     if not access_token or not audio_file:
-        raise RuntimeError("Set HF_ACCESS_TOKEN and INTERVIEW_AUDIO_FILE environment variables before running.")
+        access_token = "e6itqaPMdDfti6Gn3F75BSGQ6vegXBb7ADBpQkpq32A="
+        audio_file = r"D:\DIP24\DIP-Statistical-Analysis\transcription_model\interviews\navdeep_interview-03.wav"
+        #raise RuntimeError("Set HF_ACCESS_TOKEN and INTERVIEW_AUDIO_FILE environment variables before running.")
 
     service = InterviewTranscriptionService(hf_token=access_token, preferred_gpu_name="RX5700")
     segments = service.transcribe_interview(audio_file, test_duration_sec=60)
