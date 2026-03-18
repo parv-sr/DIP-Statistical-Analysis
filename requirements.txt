@@ -1,0 +1,9 @@
+torch
+pydub
+whisperx
+noisereduce
+numpy
+opencv-python
+scipy
+tqdm
+seaborn

@@ -1,8 +1,7 @@
-import os 
+import os
 os.environ["HSA_OVERRIDE_GFX_VERSION"] = "10.3.0"
 
 import gc
-import os
 import wave
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -165,20 +164,9 @@ class WhisperXPipeline:
         self._free_memory()
         return result
 
-    def diarize(self, audio_path: str):
-        from whisperx.diarize import DiarizationPipeline
-        audio = load_wav_mono_16k(audio_path)
-        diarize_model = DiarizationPipeline(
-            use_auth_token=self.hf_token,
-            device=self.device_config.device,
-        )
-        diarization = diarize_model(audio)
-        self._free_memory()
-        return diarization
-
 
 class InterviewTranscriptionService:
-    """Independent transcription pipeline (audio prep -> ASR -> diarization -> merge)."""
+    """Independent transcription pipeline (audio prep -> ASR -> align)."""
 
     def __init__(self, hf_token: str, preferred_gpu_name: str = "RX5700"):
         self.audio_processor = AudioProcessor()
@@ -188,46 +176,57 @@ class InterviewTranscriptionService:
     def transcribe_interview(self, audio_path: str, test_duration_sec: Optional[int] = None) -> List[Dict[str, Any]]:
         cleaned_path = self.audio_processor.process_file(audio_path, test_duration_sec=test_duration_sec)
 
-        with tqdm(total=4, desc="Transcription Pipeline", bar_format="{l_bar}{bar} [ time left: {remaining} ]") as pbar:
-            pbar.set_description("Transcribing Audio")
+        with tqdm(total=2, desc="Transcription Pipeline", bar_format="{l_bar}{bar} [ time left: {remaining} ]") as pbar:
+            pbar.set_description("Transcribing & Aligning Audio")
             transcript_result = self.whisper_pipeline.transcribe_and_align(cleaned_path)
-            pbar.update(1)
-
-            pbar.set_description("Clustering Speakers")
-            diarization_result = self.whisper_pipeline.diarize(cleaned_path)
-            pbar.update(1)
-
-            pbar.set_description("Merging Timestamps")
-            final_result = whisperx.assign_word_speakers(diarization_result, transcript_result)
             pbar.update(1)
 
             pbar.set_description("Finalizing")
             pbar.update(1)
 
-        return final_result["segments"]
+        return transcript_result["segments"]
 
 
 def main() -> None:
     access_token = os.getenv("HF_ACCESS_TOKEN")
-    audio_file = os.getenv("INTERVIEW_AUDIO_FILE")
-
-    if not access_token or not audio_file:
+    if not access_token:
         access_token = "e6itqaPMdDfti6Gn3F75BSGQ6vegXBb7ADBpQkpq32A="
-        audio_file = r"D:\DIP24\DIP-Statistical-Analysis\transcription_model\interviews\navdeep_interview-03.wav"
-        #raise RuntimeError("Set HF_ACCESS_TOKEN and INTERVIEW_AUDIO_FILE environment variables before running.")
-
+        
+    interviews_at = r"D:\DIP24\DIP-Statistical-Analysis\transcription_model\interviews"
+    
+    print("Loading AI models into RAM... This may take a moment.")
     service = InterviewTranscriptionService(hf_token=access_token, preferred_gpu_name="RX5700")
-    segments = service.transcribe_interview(audio_file, test_duration_sec=60)
+    
+    for root, dirs, files in os.walk(interviews_at):
+        for file in files:
+            if not file.lower().endswith(".wav"):
+                continue
+            if file.lower().endswith("_cleaned.wav"):
+                continue
+            
+            audio_file = os.path.join(root, file)
+            output_path = f"{audio_file}_transcription.txt"
 
-    output_path = f"{audio_file}_transcription.txt"
-    with open(output_path, "w", encoding="utf-8") as file:
-        for segment in segments:
-            speaker = segment.get("speaker", "UNKNOWN")
-            text = segment.get("text", "").strip()
-            file.write(f"[{speaker}]: {text}\n")
+            if os.path.exists(output_path):
+                print(f"Transcription already exists for {file}, skipping.")
+                continue
 
-    print(f"Created transcript file: {output_path}")
+            print(f"Processing interview audio: {file}")
 
+            if file is None:
+                raise ValueError("Audio path is None — check earlier step")
+
+            try:
+                segments = service.transcribe_interview(audio_file)
+                with open(output_path, "w", encoding="utf-8") as text_file:
+                    for segment in segments:
+                        start = round(segment.get("start", 0), 2)
+                        end = round(segment.get("end", 0), 2)
+                        text = segment.get("text", "").strip()
+                        text_file.write(f"[{start}s - {end}]s {text}\n")
+                print(f"Transcription saved to: {output_path}")
+            except Exception as e:
+                print(f"Error processing {file}: {e}")
 
 if __name__ == "__main__":
     main()

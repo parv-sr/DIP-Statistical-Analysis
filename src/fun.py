@@ -57,21 +57,10 @@ class Cat(LandAnimal, Mammal):
 
 #---------------------------------------------
 
-h = Horse()
-h.make_sound()
-print(h.colour)
-h.child()
+import ctypes
+import os
 
-print("="*40)
+dll_path = r"D:\DIP24\DIP-Statistical-Analysis\venv\Lib\site-packages\ctranslate2\ctranslate2.dll"
+ctypes.CDLL(dll_path)
 
-d = Dog()
-d.make_sound()
-print(d.colour)
-d.child()
-
-print("="*40)
-
-c = Cat()
-c.make_sound()
-print(c.colour)
-c.child()
+print("DLL loaded successfully")
