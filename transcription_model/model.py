@@ -228,5 +228,25 @@ def main() -> None:
             except Exception as e:
                 print(f"Error processing {file}: {e}")
 
+
+def process_one() -> None:
+    access_token = os.getenv("HF_ACCESS_TOKEN")
+    audio_file = os.getenv("INTERVIEW_AUDIO_FILE")
+
+    if not access_token or not audio_file:
+        raise RuntimeError("Set HF_ACCESS_TOKEN and INTERVIEW_AUDIO_FILE environment variables before running.")
+
+    service = InterviewTranscriptionService(hf_token=access_token, preferred_gpu_name="RX5700")
+    segments = service.transcribe_interview(audio_file, test_duration_sec=60)
+
+    output_path = f"{audio_file}_transcription.txt"
+    with open(output_path, "w", encoding="utf-8") as file:
+        for segment in segments:
+            speaker = segment.get("speaker", "UNKNOWN")
+            text = segment.get("text", "").strip()
+            file.write(f"[{speaker}]: {text}\n")
+
+    print(f"Created transcript file: {output_path}")
+
 if __name__ == "__main__":
     main()
